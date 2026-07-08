@@ -34,7 +34,7 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_CONTRACT_ADDRESS: 0xBab0A82101FbB45257DC87Ec82E312b3F8fb25cB
+          VITE_CONTRACT_ADDRESS: "0xBab0A82101FbB45257DC87Ec82E312b3F8fb25cB"
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
