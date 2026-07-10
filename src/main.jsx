@@ -73,20 +73,49 @@ function parseMetadata(metadataURI) {
 }
 
 function getInjectedWalletName(provider, fallback = "浏览器钱包") {
-  if (provider?.isMetaMask) return "MetaMask";
   if (provider?.isOkxWallet || provider?.isOKExWallet) return "OKX Wallet";
+  if (provider?.isMetaMask) return "MetaMask";
   if (provider?.isRabby) return "Rabby";
   if (provider?.isCoinbaseWallet) return "Coinbase Wallet";
   return fallback;
 }
 
+function getInjectedWalletId(provider, index = 0) {
+  if (provider?.isOkxWallet || provider?.isOKExWallet) return "com.okx.wallet";
+  if (provider?.isMetaMask) return "io.metamask";
+  if (provider?.isRabby) return "io.rabby";
+  if (provider?.isCoinbaseWallet) return "com.coinbase.wallet";
+  return `legacy-wallet-${index}`;
+}
+
 function dedupeWallets(wallets) {
+  const providerRefs = new Set();
   const seen = new Set();
   return wallets.filter((wallet) => {
-    const key = wallet.id || wallet.info?.uuid || wallet.info?.rdns || wallet.name;
+    if (providerRefs.has(wallet.provider)) return false;
+    providerRefs.add(wallet.provider);
+
+    const key = wallet.rdns || wallet.id || wallet.name;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
+  });
+}
+
+function getLegacyWallets() {
+  if (typeof window === "undefined" || !window.ethereum) return [];
+
+  const providers = window.ethereum.providers?.length ? window.ethereum.providers : [window.ethereum];
+  return providers.map((injectedProvider, index) => {
+    const name = getInjectedWalletName(injectedProvider);
+    const id = getInjectedWalletId(injectedProvider, index);
+    return {
+      id,
+      rdns: id,
+      name,
+      provider: injectedProvider,
+      source: "legacy",
+    };
   });
 }
 
@@ -298,43 +327,43 @@ function App() {
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
 
-    const discoveredWallets = [];
+    const eip6963Wallets = [];
+    let legacyTimer = null;
+
+    const publishWallets = () => {
+      if (eip6963Wallets.length > 0) {
+        setWallets(dedupeWallets(eip6963Wallets));
+        return;
+      }
+
+      setWallets(dedupeWallets(getLegacyWallets()));
+    };
+
     const addWallet = (wallet) => {
-      discoveredWallets.push(wallet);
-      setWallets(dedupeWallets(discoveredWallets));
+      eip6963Wallets.push(wallet);
+      publishWallets();
     };
 
     const onAnnounceProvider = (event) => {
       const { info, provider: announcedProvider } = event.detail;
       addWallet({
         id: info.uuid || info.rdns || info.name,
+        rdns: info.rdns,
         name: info.name,
         icon: info.icon,
         provider: announcedProvider,
+        source: "eip6963",
       });
     };
 
     window.addEventListener("eip6963:announceProvider", onAnnounceProvider);
     window.dispatchEvent(new Event("eip6963:requestProvider"));
 
-    if (window.ethereum?.providers?.length) {
-      window.ethereum.providers.forEach((injectedProvider, index) => {
-        addWallet({
-          id: `${getInjectedWalletName(injectedProvider)}-${index}`,
-          name: getInjectedWalletName(injectedProvider),
-          provider: injectedProvider,
-        });
-      });
-    } else if (window.ethereum) {
-      addWallet({
-        id: getInjectedWalletName(window.ethereum),
-        name: getInjectedWalletName(window.ethereum),
-        provider: window.ethereum,
-      });
-    }
+    legacyTimer = window.setTimeout(publishWallets, 500);
 
     return () => {
       window.removeEventListener("eip6963:announceProvider", onAnnounceProvider);
+      if (legacyTimer) window.clearTimeout(legacyTimer);
     };
   }, []);
 
