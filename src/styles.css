@@ -201,6 +201,45 @@ dt {
   padding: 12px 14px;
 }
 
+.wallet-picker {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dde3ec;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(31, 43, 70, 0.06);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding: 16px 18px;
+}
+
+.wallet-picker h2 {
+  margin-bottom: 5px;
+}
+
+.wallet-picker p {
+  color: #69758a;
+  line-height: 1.5;
+  margin-bottom: 0;
+}
+
+.wallet-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.wallet-options button {
+  font-weight: 750;
+}
+
+.wallet-options img {
+  height: 18px;
+  width: 18px;
+}
+
 .workspace {
   display: grid;
   gap: 14px;
@@ -371,6 +410,7 @@ dd {
   }
 
   .topbar,
+  .wallet-picker,
   .task-head {
     align-items: stretch;
     flex-direction: column;
@@ -384,5 +424,9 @@ dd {
 
   .actions {
     flex-wrap: wrap;
+  }
+
+  .wallet-options {
+    justify-content: flex-start;
   }
 }

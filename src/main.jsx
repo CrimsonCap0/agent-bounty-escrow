@@ -22,6 +22,7 @@ import "./styles.css";
 const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS || "";
 const MONAD_CHAIN_ID = "0x279f";
 const MONAD_EXPLORER = "https://testnet.monadvision.com";
+const MONAD_RPC_URL = "https://testnet-rpc.monad.xyz";
 
 const ABI = [
   "function taskCount() view returns (uint256)",
@@ -34,7 +35,7 @@ const ABI = [
   "function getTask(uint256 taskId) view returns ((uint256 id,address creator,address worker,uint256 bounty,string metadataURI,string resultURI,uint64 createdAt,uint64 deadline,uint8 status))",
 ];
 
-const statusLabels = ["Open", "Accepted", "Submitted", "Approved", "Cancelled", "Refunded"];
+const statusLabels = ["开放中", "已接单", "已提交", "已放款", "已取消", "已退款"];
 
 const starterTasks = [
   {
@@ -71,9 +72,30 @@ function parseMetadata(metadataURI) {
   return { title, brief: rest.join("\n") || "暂无详情。" };
 }
 
+function getInjectedWalletName(provider, fallback = "浏览器钱包") {
+  if (provider?.isMetaMask) return "MetaMask";
+  if (provider?.isOkxWallet || provider?.isOKExWallet) return "OKX Wallet";
+  if (provider?.isRabby) return "Rabby";
+  if (provider?.isCoinbaseWallet) return "Coinbase Wallet";
+  return fallback;
+}
+
+function dedupeWallets(wallets) {
+  const seen = new Set();
+  return wallets.filter((wallet) => {
+    const key = wallet.id || wallet.info?.uuid || wallet.info?.rdns || wallet.name;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function App() {
   const [account, setAccount] = useState("");
   const [chainId, setChainId] = useState("");
+  const [wallets, setWallets] = useState([]);
+  const [selectedWallet, setSelectedWallet] = useState(null);
+  const [showWalletPicker, setShowWalletPicker] = useState(false);
   const [tasks, setTasks] = useState(starterTasks);
   const [isLoading, setIsLoading] = useState(false);
   const [activeTx, setActiveTx] = useState("");
@@ -90,31 +112,46 @@ function App() {
   const isMonad = chainId === MONAD_CHAIN_ID;
 
   const provider = useMemo(() => {
-    if (!window.ethereum) return null;
-    return new ethers.BrowserProvider(window.ethereum);
-  }, []);
+    if (!selectedWallet?.provider) return null;
+    return new ethers.BrowserProvider(selectedWallet.provider);
+  }, [selectedWallet]);
 
-  async function connectWallet() {
-    if (!window.ethereum) {
-      setNotice("未检测到 MetaMask。");
+  const readProvider = useMemo(() => new ethers.JsonRpcProvider(MONAD_RPC_URL), []);
+
+  async function connectWallet(wallet = selectedWallet) {
+    if (!wallet && wallets.length > 1) {
+      setShowWalletPicker(true);
       return;
     }
-    const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+
+    const targetWallet = wallet || wallets[0];
+    if (!targetWallet?.provider) {
+      setNotice("未检测到可用钱包，请确认 MetaMask 已安装并启用。");
+      return;
+    }
+
+    const accounts = await targetWallet.provider.request({ method: "eth_requestAccounts" });
+    setSelectedWallet(targetWallet);
+    setShowWalletPicker(false);
     setAccount(accounts[0]);
-    const currentChain = await window.ethereum.request({ method: "eth_chainId" });
+    const currentChain = await targetWallet.provider.request({ method: "eth_chainId" });
     setChainId(currentChain);
+    localStorage.setItem("preferredWallet", targetWallet.id || targetWallet.name);
   }
 
   async function switchToMonad() {
-    if (!window.ethereum) return;
+    if (!selectedWallet?.provider) {
+      setShowWalletPicker(true);
+      return;
+    }
     try {
-      await window.ethereum.request({
+      await selectedWallet.provider.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: MONAD_CHAIN_ID }],
       });
     } catch (error) {
       if (error.code === 4902) {
-        await window.ethereum.request({
+        await selectedWallet.provider.request({
           method: "wallet_addEthereumChain",
           params: [
             {
@@ -133,7 +170,12 @@ function App() {
   }
 
   async function getContract(withSigner = false) {
-    if (!provider || !hasContract) return null;
+    if (!hasContract) return null;
+    if (!withSigner) return new ethers.Contract(CONTRACT_ADDRESS, ABI, readProvider);
+    if (!provider) {
+      setShowWalletPicker(true);
+      throw new Error("请先选择并连接钱包。");
+    }
     const signerOrProvider = withSigner ? await provider.getSigner() : provider;
     return new ethers.Contract(CONTRACT_ADDRESS, ABI, signerOrProvider);
   }
@@ -172,7 +214,7 @@ function App() {
     setNotice("");
     setActiveTx(actionName);
     try {
-      if (hasContract && account && isMonad) {
+      if (hasContract && account && isMonad && selectedWallet) {
         const tx = await onchainAction();
         setNotice(`交易已提交：${tx.hash}`);
         await tx.wait();
@@ -254,14 +296,66 @@ function App() {
   }
 
   useEffect(() => {
-    if (!window.ethereum) return;
-    window.ethereum.request({ method: "eth_accounts" }).then(([first]) => {
-      if (first) setAccount(first);
-    });
-    window.ethereum.request({ method: "eth_chainId" }).then(setChainId);
-    window.ethereum.on("accountsChanged", ([first]) => setAccount(first || ""));
-    window.ethereum.on("chainChanged", setChainId);
+    if (typeof window === "undefined") return undefined;
+
+    const discoveredWallets = [];
+    const addWallet = (wallet) => {
+      discoveredWallets.push(wallet);
+      setWallets(dedupeWallets(discoveredWallets));
+    };
+
+    const onAnnounceProvider = (event) => {
+      const { info, provider: announcedProvider } = event.detail;
+      addWallet({
+        id: info.uuid || info.rdns || info.name,
+        name: info.name,
+        icon: info.icon,
+        provider: announcedProvider,
+      });
+    };
+
+    window.addEventListener("eip6963:announceProvider", onAnnounceProvider);
+    window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+    if (window.ethereum?.providers?.length) {
+      window.ethereum.providers.forEach((injectedProvider, index) => {
+        addWallet({
+          id: `${getInjectedWalletName(injectedProvider)}-${index}`,
+          name: getInjectedWalletName(injectedProvider),
+          provider: injectedProvider,
+        });
+      });
+    } else if (window.ethereum) {
+      addWallet({
+        id: getInjectedWalletName(window.ethereum),
+        name: getInjectedWalletName(window.ethereum),
+        provider: window.ethereum,
+      });
+    }
+
+    return () => {
+      window.removeEventListener("eip6963:announceProvider", onAnnounceProvider);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!selectedWallet?.provider) return undefined;
+
+    selectedWallet.provider.request({ method: "eth_accounts" }).then(([first]) => {
+      setAccount(first || "");
+    });
+    selectedWallet.provider.request({ method: "eth_chainId" }).then(setChainId);
+
+    const onAccountsChanged = ([first]) => setAccount(first || "");
+    const onChainChanged = (currentChainId) => setChainId(currentChainId);
+    selectedWallet.provider.on?.("accountsChanged", onAccountsChanged);
+    selectedWallet.provider.on?.("chainChanged", onChainChanged);
+
+    return () => {
+      selectedWallet.provider.removeListener?.("accountsChanged", onAccountsChanged);
+      selectedWallet.provider.removeListener?.("chainChanged", onChainChanged);
+    };
+  }, [selectedWallet]);
 
   useEffect(() => {
     if (hasContract) loadTasks();
@@ -284,18 +378,35 @@ function App() {
             <span className="mode-badge">演示模式</span>
           )}
           {account ? (
-            <button className="wallet-button" type="button" onClick={connectWallet}>
+            <button className="wallet-button" type="button" onClick={() => setShowWalletPicker(true)}>
               <Wallet size={16} />
-              {shortAddress(account)}
+              {selectedWallet?.name || "已连接"} · {shortAddress(account)}
             </button>
           ) : (
-            <button className="primary" type="button" onClick={connectWallet}>
+            <button className="primary" type="button" onClick={() => connectWallet()}>
               <PlugZap size={16} />
               连接钱包
             </button>
           )}
         </div>
       </header>
+
+      {showWalletPicker ? (
+        <section className="wallet-picker">
+          <div>
+            <h2>选择钱包</h2>
+            <p>检测到多个浏览器钱包，请选择这次要用于 Monad Testnet 交互的钱包。</p>
+          </div>
+          <div className="wallet-options">
+            {wallets.map((wallet) => (
+              <button key={wallet.id || wallet.name} type="button" onClick={() => connectWallet(wallet)}>
+                {wallet.icon ? <img src={wallet.icon} alt="" /> : <Wallet size={18} />}
+                {wallet.name}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="summary-grid">
         <div className="summary-cell">
